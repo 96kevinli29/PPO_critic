@@ -621,12 +621,17 @@ def patch_valuehead_model(model) -> None:
 def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
 
+    # 从环境变量或模型配置获取 attn_implementation，默认 sdpa（PyTorch 2.0+ 内置加速）
+    attn_impl = os.getenv("VERL_ATTN_IMPLEMENTATION") or os.getenv("HF_ATTN_IMPLEMENTATION")
+    if not attn_impl:
+        attn_impl = getattr(model_config, "_attn_implementation", None) or "sdpa"
+
     try:
         model = AutoModelForTokenClassification.from_pretrained(
             pretrained_model_name_or_path=local_path,
             torch_dtype=torch_dtype,
             config=model_config,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_impl,
             trust_remote_code=trust_remote_code,
         )
         return model
@@ -648,7 +653,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         pretrained_model_name_or_path=local_path,
         torch_dtype=torch_dtype,
         config=model_config,
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_impl,
         trust_remote_code=trust_remote_code,
     )
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
