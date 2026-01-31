@@ -23,6 +23,8 @@
 
 verl is a flexible, efficient and production-ready RL training library for large language models (LLMs).
 
+> 备注：本仓库源码来自 https://github.com/verl-project/verl/tree/main
+
 verl is the open-source version of **[HybridFlow: A Flexible and Efficient RLHF Framework](https://arxiv.org/abs/2409.19256v2)** paper.
 
 verl is flexible and easy to use with:
