@@ -1,5 +1,6 @@
 **/*.pt
 **/checkpoints
+critic_qwen3_0.6b_hf/
 **/wget-log
 **/_build/
 **/*.ckpt

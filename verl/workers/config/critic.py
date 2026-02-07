@@ -12,6 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ===============================================================================
+# [Custom Modifications - 2026-02-01]
+# ===============================================================================
+# Freeze Critic 配置项
+#
+# 1. FSDPCriticConfig 类
+#    - 位置: 约第 201 行
+#    - 功能: 添加 freeze: bool = False 字段，支持冻结 critic 参数
+#    - 配置: critic.freeze (true/false，默认 false)
+# ===============================================================================
+
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional
@@ -65,6 +76,7 @@ class CriticConfig(BaseConfig):
     strategy: str = MISSING
     ppo_micro_batch_size_per_gpu: Optional[int] = None
     enable: Optional[bool] = None
+    freeze: bool = False  # [Custom] 冻结 critic 参数，不参与梯度更新
     rollout_n: int = 1
     ppo_mini_batch_size: int = 1
     use_dynamic_bsz: bool = False
@@ -198,6 +210,7 @@ class FSDPCriticConfig(CriticConfig):
     forward_micro_batch_size_per_gpu: int = 1
     ulysses_sequence_parallel_size: int = 1
     grad_clip: float = 1.0
+    freeze: bool = False  # [Custom] 冻结 critic 参数，不参与梯度更新
 
     def __post_init__(self):
         """Validate FSDP critic configuration parameters."""

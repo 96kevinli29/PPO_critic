@@ -13,6 +13,29 @@
 # limitations under the License.
 """
 The main entry point to run the PPO algorithm
+
+===============================================================================
+[Custom Modifications - 2026-02-01]
+===============================================================================
+Freeze Critic 支持 (CriticWorker 类)
+
+1. _build_critic_model_optimizer() 方法
+   - 位置: 约第 1483-1493 行
+   - 功能: 当 freeze=True 时，冻结所有参数并返回 None optimizer
+   - 搜索标记: "========== Freeze Critic 支持 =========="
+
+2. init_model() 方法
+   - 位置: 约第 1536-1538 行
+   - 功能: 处理 None optimizer，标记 _freeze_critic 状态
+   - 搜索标记: "# 标记是否冻结 critic"
+
+3. update_critic() 方法
+   - 位置: 约第 1588-1593 行
+   - 功能: 当 _freeze_critic=True 时，跳过更新并返回空 metrics
+   - 搜索标记: "========== Frozen Critic: 跳过更新 =========="
+
+配置项: critic.freeze (true/false，默认 false)
+===============================================================================
 """
 
 import datetime
@@ -1470,6 +1493,19 @@ class CriticWorker(Worker, DistProfilerExtension):
 
         log_gpu_memory_usage("After critic FSDP", logger=None)
 
+        # ========== Freeze Critic 支持 ==========
+        freeze_critic = config.get("freeze", False)
+        if freeze_critic:
+            # 冻结所有参数，不参与梯度更新
+            for param in critic_module.parameters():
+                param.requires_grad = False
+            critic_module.eval()
+            if self.rank == 0:
+                print("[CriticWorker] Critic is FROZEN: requires_grad=False, no optimizer created.")
+            # 返回 None optimizer 和 scheduler
+            return critic_module, None, None
+        # ========== End Freeze Critic ==========
+
         critic_optimizer = build_optimizer(critic_module.parameters(), config.optim)
 
         total_steps = config.optim.get("total_training_steps", 0)
@@ -1518,13 +1554,16 @@ class CriticWorker(Worker, DistProfilerExtension):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.critic_module)
             log_gpu_memory_usage("After offload critic model during init", logger=logger)
-        if self._is_offload_optimizer:
+        if self._is_offload_optimizer and self.critic_optimizer is not None:
             offload_fsdp_optimizer(optimizer=self.critic_optimizer)
             log_gpu_memory_usage("After offload critic optimizer during init", logger=logger)
 
         self.critic = DataParallelPPOCritic(
             config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer
         )
+        
+        # 标记是否冻结 critic
+        self._freeze_critic = self.config.get("freeze", False)
 
         self.flops_counter = FlopsCounter(self.critic_model_config)
         self.checkpoint_manager = FSDPCheckpointManager(
@@ -1558,9 +1597,16 @@ class CriticWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="critic"))
     @DistProfiler.annotate(color="pink", role="critic_update")
     def update_critic(self, data: DataProto):
+        # ========== Frozen Critic: 跳过更新 ==========
+        if getattr(self, "_freeze_critic", False):
+            # Critic 已冻结，返回空 metrics
+            output = DataProto(batch=None, meta_info={"metrics": {"critic/frozen": 1.0}})
+            return output.to("cpu")
+        # ========== End Frozen Critic ==========
+
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
-        if self._is_offload_optimizer:
+        if self._is_offload_optimizer and self.critic_optimizer is not None:
             load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=get_device_id())
 
         # perform forward computation
@@ -1574,15 +1620,16 @@ class CriticWorker(Worker, DistProfilerExtension):
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics["perf/mfu/critic"] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
 
-            lr = self.critic_lr_scheduler.get_last_lr()[0]
-            metrics["critic/lr"] = lr
-            self.critic_lr_scheduler.step()
+            if self.critic_lr_scheduler is not None:
+                lr = self.critic_lr_scheduler.get_last_lr()[0]
+                metrics["critic/lr"] = lr
+                self.critic_lr_scheduler.step()
 
             output = DataProto(batch=None, meta_info={"metrics": metrics})
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.critic_module)
-        if self._is_offload_optimizer:
+        if self._is_offload_optimizer and self.critic_optimizer is not None:
             offload_fsdp_optimizer(optimizer=self.critic_optimizer)
 
         output = output.to("cpu")

@@ -16,6 +16,29 @@
 """
 PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
+
+===============================================================================
+[Custom Modifications - 2026-02-01]
+===============================================================================
+1. Reward Source (reward 来源: rule_based | critic)
+   - 配置: algorithm.reward_source ("rule_based" | "critic"，默认 "rule_based")
+   - rule_based: 使用 reward_fn (规则/环境) 计算 reward
+   - critic: 使用 critic 的 value 作为 reward 信号（需 use_critic=True）
+   - 搜索标记: "========== Reward Source"
+
+2. Reward Mask (轨迹级别随机 mask)
+   - 位置: fit() 方法中，约第 1565-1602 行
+   - 功能: 在 GAE 计算之前，对整条轨迹的 reward 做 Bernoulli 随机 mask
+   - 配置: algorithm.reward_mask_ratio (0.0-1.0，默认 0.0 不 mask)
+   - Advantage 翻转: 对被 mask 轨迹的 advantage 取反，使 critic value 成为有效的学习信号
+   - 搜索标记: "========== Reward Mask"
+
+4. Freeze Critic (跳过 critic 更新)
+   - 位置: fit() 方法中，约第 1621-1630 行
+   - 功能: 当 critic.freeze=True 时，跳过 _update_critic() 调用
+   - 配置: critic.freeze (true/false，默认 false)
+   - 搜索标记: "# update critic (skip if frozen)"
+===============================================================================
 """
 
 import json
@@ -1554,14 +1577,63 @@ class RayPPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        # compute rewards. apply_kl_penalty if available
-                        if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(
-                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
-                            )
-                            metrics.update(kl_metrics)
+                        # ========== Reward Source (rule_based | critic) ==========
+                        reward_source = self.config.algorithm.get("reward_source", "rule_based")
+                        if reward_source == "critic":
+                            if not self.use_critic:
+                                raise ValueError("reward_source=critic requires use_critic=True")
+                            # 使用 critic 的 value 作为 reward：取每条轨迹最后一个有效 token 的 value
+                            values = batch.batch["values"]
+                            response_mask = batch.batch["response_mask"]
+                            bs, resp_len = values.shape[0], values.shape[1]
+                            device = values.device
+                            # 最后一个有效 response token 的索引（每行）
+                            arange = torch.arange(resp_len, device=device, dtype=torch.float32)
+                            last_valid_col = (
+                                (response_mask.float() * (arange + 1)).max(dim=-1).values - 1
+                            ).long().clamp(min=0)
+                            row_indices = torch.arange(bs, device=device)
+                            values_at_last = values[row_indices, last_valid_col].float()
+                            # 转为 token_level 格式：0  everywhere except last valid position
+                            token_level_rewards_from_critic = torch.zeros_like(values, dtype=torch.float32)
+                            token_level_rewards_from_critic[row_indices, last_valid_col] = values_at_last
+                            batch.batch["token_level_rewards"] = token_level_rewards_from_critic
+                            batch.batch["token_level_scores"] = token_level_rewards_from_critic
+                            metrics["reward_source/critic"] = 1.0
                         else:
-                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                            # rule_based: 使用 reward_fn 或 rm 的输出
+                            if self.config.algorithm.use_kl_in_reward:
+                                batch, kl_metrics = apply_kl_penalty(
+                                    batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                                )
+                                metrics.update(kl_metrics)
+                            else:
+                                batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                            metrics["reward_source/rule_based"] = 1.0
+                        # ========== End Reward Source ==========
+
+                        # ========== Reward Mask (轨迹级别随机 mask) ==========
+                        # 在 GAE 计算之前，对整条轨迹的 reward 做 Bernoulli mask
+                        # 被 mask 的轨迹 reward 置 0（需配合 flip 使 critic value 成为有效信号）
+                        reward_mask_ratio = self.config.algorithm.get("reward_mask_ratio", 0.0)
+                        if reward_mask_ratio > 0.0:
+                            batch_size = batch.batch["token_level_rewards"].shape[0]
+                            device = batch.batch["token_level_rewards"].device
+                            # Bernoulli mask: 1 表示保留，0 表示 mask（整条轨迹 reward 置 0）
+                            keep_mask = torch.bernoulli(
+                                torch.ones(batch_size, device=device) * (1.0 - reward_mask_ratio)
+                            )
+                            # 记录被 mask 的样本数量
+                            num_masked = int((keep_mask == 0).sum().item())
+                            metrics["reward_mask/num_masked"] = num_masked
+                            metrics["reward_mask/mask_ratio_actual"] = num_masked / batch_size
+                            # 整条轨迹的 reward 整体置 0（不是 token-level mask）
+                            batch.batch["token_level_rewards"] = (
+                                batch.batch["token_level_rewards"] * keep_mask.unsqueeze(-1)
+                            )
+                            # 保存 keep_mask 供 GAE 后翻转被 mask 轨迹的 advantage（见下方）
+                            batch.batch["_reward_keep_mask"] = keep_mask
+                        # ========== End Reward Mask ==========
 
                         # Compute rollout correction: IS weights, rejection sampling, and metrics
                         # Only runs in decoupled mode (computes once per batch using stable π_old)
@@ -1593,12 +1665,34 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
 
-                    # update critic
+                        # ========== Reward Mask: 翻转被 mask 轨迹的 advantage ==========
+                        # 当 reward 被 mask 为 0 时，GAE 得到的 advantage 符号相反（鼓励差样本、抑制好样本）
+                        # 翻转后：高 V(好) -> 正 advantage -> 鼓励；低 V(差) -> 负 advantage -> 抑制
+                        if "_reward_keep_mask" in batch.batch:
+                            keep_mask = batch.batch["_reward_keep_mask"]
+                            flip_when_masked = self.config.algorithm.get(
+                                "reward_mask_flip_adv_when_masked", True
+                            )
+                            if flip_when_masked:
+                                # 被 mask 轨迹 (keep=0): 乘 -1；未 mask (keep=1): 乘 +1
+                                batch.batch["advantages"] = batch.batch["advantages"] * (
+                                    2 * keep_mask.float() - 1
+                                ).unsqueeze(-1)
+                                metrics["reward_mask/flip_adv"] = 1.0
+                            del batch.batch["_reward_keep_mask"]
+                        # ========== End Reward Mask Flip ==========
+
+                    # update critic (skip if frozen)
                     if self.use_critic:
-                        with marked_timer("update_critic", timing_raw, color="pink"):
-                            critic_output = self._update_critic(batch)
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
-                        metrics.update(critic_output_metrics)
+                        freeze_critic = self.config.critic.get("freeze", False)
+                        if not freeze_critic:
+                            with marked_timer("update_critic", timing_raw, color="pink"):
+                                critic_output = self._update_critic(batch)
+                            critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
+                            metrics.update(critic_output_metrics)
+                        else:
+                            # Critic is frozen, skip update but log a metric
+                            metrics["critic/frozen"] = 1.0
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:

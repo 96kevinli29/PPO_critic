@@ -12,6 +12,10 @@ strategy: ???
 # set it to True manually if you always want to enable critic worker
 enable: null
 
+# [Custom] 是否冻结 critic 参数（不参与梯度更新，不创建 optimizer）
+# 设置为 true 时，critic 仍参与前向计算提供 value baseline
+freeze: false
+
 # optimizer configs
 optim:
 

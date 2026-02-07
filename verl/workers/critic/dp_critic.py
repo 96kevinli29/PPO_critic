@@ -13,6 +13,19 @@
 # limitations under the License.
 """
 Implement a multiprocess PPOCritic
+
+===============================================================================
+[Custom Modifications - 2026-02-01]
+===============================================================================
+Freeze Critic 支持 (DataParallelPPOCritic 类)
+
+1. update_critic() 方法
+   - 位置: 约第 195-199 行
+   - 功能: 当 critic_optimizer=None 时（frozen），直接返回空 metrics
+   - 搜索标记: "========== Frozen Critic: 跳过更新 =========="
+
+说明: 此检查作为防御性编程，主要逻辑在 fsdp_workers.py 中处理
+===============================================================================
 """
 
 import logging
@@ -190,6 +203,12 @@ class DataParallelPPOCritic(BasePPOCritic):
 
     @GPUMemoryLogger(role="dp critic", logger=logger)
     def update_critic(self, data: DataProto):
+        # ========== Frozen Critic: 跳过更新 ==========
+        if self.critic_optimizer is None:
+            # Critic is frozen, skip update
+            return {"critic/frozen": 1.0}
+        # ========== End Frozen Critic ==========
+
         # make sure we are in training mode
         self.critic_module.train()
         metrics = {
