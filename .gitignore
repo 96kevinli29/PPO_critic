@@ -1,0 +1,51 @@
+# 环境与缓存
+miniconda3/
+rl/python310/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.cache/
+
+# 训练产物与日志
+checkpoints/
+**/*.pt
+**/*.ckpt
+outputs/
+*.log
+nohup.out
+wandb/
+.wandb_cache/
+ray_tmp/
+
+# 本地模型权重（体积大，建议单独管理）
+Qwen3-0.6B/
+Qwen3-1.7B/
+Qwen3-4B/
+Qwen3-8B/
+critic_qwen3_*_ppo_*/
+critic_qwen3_*_hf/
+
+# 数据与临时
+data/
+*.parquet
+tmp/
+tmpc0kkdaeh/
+target/
+*.tar.gz
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*~
+
+# 其他
+.git/
+*.egg-info/
+.eggs/
+dist/
+build/
