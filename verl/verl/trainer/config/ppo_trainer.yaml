@@ -74,8 +74,12 @@ algorithm:
   # Discount factor for future rewards
   gamma: 1.0
 
-  # Trade-off between bias and variance in the GAE estimator
+  # Trade-off between bias and variance in the GAE estimator (used when lam_actor/lam_critic not set)
   lam: 1.0
+
+  # GAE lambda 分离：actor 用 lam_actor 算 advantage（默认 0.95 降方差），critic 用 lam_critic 算 returns（默认 1.0）；未设则用 lam
+  lam_actor: 0.95
+  lam_critic: 1.0
 
   # Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
   adv_estimator: gae
@@ -106,6 +110,9 @@ algorithm:
 
     # Target KL divergence (used for adaptive controller)
     target_kl: 0.1
+
+  # Reward mask type when reward_mask_ratio > 0: "bernoulli" (per-trajectory random) | "fixed_ratio" (exact count per batch)
+  reward_mask_type: bernoulli
 
   # Whether to enable preference feedback PPO
   use_pf_ppo: False

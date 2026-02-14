@@ -20,24 +20,27 @@ This trainer supports model-agonistic model initialization with huggingface
 ===============================================================================
 [Custom Modifications - 2026-02-01]
 ===============================================================================
-1. Reward Source (reward 来源: rule_based | critic)
-   - 配置: algorithm.reward_source ("rule_based" | "critic"，默认 "rule_based")
-   - rule_based: 使用 reward_fn (规则/环境) 计算 reward
-   - critic: 使用 critic 的 value 作为 reward 信号（需 use_critic=True）
-   - 搜索标记: "========== Reward Source"
+1. Reward（与 verl 一致：rule_based / RM，仅加二值化）
+   - reward 来自 reward_fn 或 reward_model.model.path（外来模型，含 critic 转 HF 当 RM）
+   - 二值化: algorithm.reward_binarize=true 时 reward>algorithm.reward_threshold 为 1 否则 0
+   - 搜索标记: "========= Reward"
 
 2. Reward Mask (轨迹级别随机 mask)
-   - 位置: fit() 方法中，约第 1565-1602 行
+   - 位置: fit() 方法中，约第 1615-1635 行
    - 功能: 在 GAE 计算之前，对整条轨迹的 reward 做 Bernoulli 随机 mask
    - 配置: algorithm.reward_mask_ratio (0.0-1.0，默认 0.0 不 mask)
-   - Advantage 翻转: 对被 mask 轨迹的 advantage 取反，使 critic value 成为有效的学习信号
    - 搜索标记: "========== Reward Mask"
 
 4. Freeze Critic (跳过 critic 更新)
-   - 位置: fit() 方法中，约第 1621-1630 行
+   - 位置: fit() 方法中，约第 1666-1676 行
    - 功能: 当 critic.freeze=True 时，跳过 _update_critic() 调用
    - 配置: critic.freeze (true/false，默认 false)
    - 搜索标记: "# update critic (skip if frozen)"
+
+5. GAE lambda 分离 (lam_actor / lam_critic)
+   - 位置: fit() 中 compute_advantage 调用前
+   - 功能: Actor 用 lam_actor（默认 0.95）算 advantage，Critic 用 lam_critic（默认 1.0）算 returns；不设则用 algorithm.lam
+   - 配置: algorithm.lam_actor、algorithm.lam_critic（见 ppo_trainer.yaml）
 ===============================================================================
 """
 
@@ -155,6 +158,8 @@ def compute_advantage(
     adv_estimator: AdvantageEstimator,
     gamma: float = 1.0,
     lam: float = 1.0,
+    lam_actor: Optional[float] = None,
+    lam_critic: Optional[float] = None,
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
@@ -168,7 +173,9 @@ def compute_advantage(
         data (DataProto): The data containing batched model outputs and inputs.
         adv_estimator (AdvantageEstimator): The advantage estimator to use (e.g., GAE, GRPO, REINFORCE++).
         gamma (float, optional): Discount factor for future rewards. Defaults to 1.0.
-        lam (float, optional): Lambda parameter for GAE. Defaults to 1.0.
+        lam (float, optional): Lambda parameter for GAE when lam_actor/lam_critic not set. Defaults to 1.0.
+        lam_actor (float, optional): GAE lambda for advantages (actor). If None, use lam.
+        lam_critic (float, optional): GAE lambda for returns (critic). If None, use lam.
         num_repeat (int, optional): Number of times to repeat the computation. Defaults to 1.
         norm_adv_by_std_in_grpo (bool, optional): Whether to normalize advantages by standard deviation in
             GRPO. Defaults to True.
@@ -177,19 +184,40 @@ def compute_advantage(
     Returns:
         DataProto: The updated data with computed advantages and returns.
     """
+    if lam_actor is None:
+        lam_actor = lam
+    if lam_critic is None:
+        lam_critic = lam
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch.keys():
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group
     if adv_estimator == AdvantageEstimator.GAE:
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
-        advantages, returns = core_algos.compute_gae_advantage_return(
-            token_level_rewards=data.batch["token_level_rewards"],
-            values=data.batch["values"],
-            response_mask=data.batch["response_mask"],
-            gamma=gamma,
-            lam=lam,
-        )
+        if lam_actor == lam_critic:
+            advantages, returns = core_algos.compute_gae_advantage_return(
+                token_level_rewards=data.batch["token_level_rewards"],
+                values=data.batch["values"],
+                response_mask=data.batch["response_mask"],
+                gamma=gamma,
+                lam=lam_actor,
+            )
+        else:
+            # Actor and critic use different GAE lambda: advantages with lam_actor, returns with lam_critic
+            advantages, _ = core_algos.compute_gae_advantage_return(
+                token_level_rewards=data.batch["token_level_rewards"],
+                values=data.batch["values"],
+                response_mask=data.batch["response_mask"],
+                gamma=gamma,
+                lam=lam_actor,
+            )
+            _, returns = core_algos.compute_gae_advantage_return(
+                token_level_rewards=data.batch["token_level_rewards"],
+                values=data.batch["values"],
+                response_mask=data.batch["response_mask"],
+                gamma=gamma,
+                lam=lam_critic,
+            )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
         if config.get("use_pf_ppo", False):
@@ -1496,7 +1524,7 @@ class RayPPOTrainer:
                                 reward_tensor = self.reward_loop_manager.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
 
-                        # Compute or extract reward for training
+                        # Compute or extract reward for training (rule-based or RM; if reward_source=critic we overwrite in adv block)
                         if self.config.reward_model.launch_reward_fn_async:
                             future_reward = compute_reward_async.remote(
                                 data=batch, config=self.config, tokenizer=self.tokenizer
@@ -1577,62 +1605,59 @@ class RayPPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        # ========== Reward Source (rule_based | critic) ==========
-                        reward_source = self.config.algorithm.get("reward_source", "rule_based")
-                        if reward_source == "critic":
-                            if not self.use_critic:
-                                raise ValueError("reward_source=critic requires use_critic=True")
-                            # 使用 critic 的 value 作为 reward：取每条轨迹最后一个有效 token 的 value
-                            values = batch.batch["values"]
-                            response_mask = batch.batch["response_mask"]
-                            bs, resp_len = values.shape[0], values.shape[1]
-                            device = values.device
-                            # 最后一个有效 response token 的索引（每行）
-                            arange = torch.arange(resp_len, device=device, dtype=torch.float32)
-                            last_valid_col = (
-                                (response_mask.float() * (arange + 1)).max(dim=-1).values - 1
-                            ).long().clamp(min=0)
-                            row_indices = torch.arange(bs, device=device)
-                            values_at_last = values[row_indices, last_valid_col].float()
-                            # 转为 token_level 格式：0  everywhere except last valid position
-                            token_level_rewards_from_critic = torch.zeros_like(values, dtype=torch.float32)
-                            token_level_rewards_from_critic[row_indices, last_valid_col] = values_at_last
-                            batch.batch["token_level_rewards"] = token_level_rewards_from_critic
-                            batch.batch["token_level_scores"] = token_level_rewards_from_critic
-                            metrics["reward_source/critic"] = 1.0
+                        # ========== Reward (与 verl 一致: rule_based / RM，仅加二值化) ==========
+                        # reward 来自 reward_fn 或 reward_model.model.path 的模型（含 critic 转 HF 当 RM）
+                        if self.config.algorithm.use_kl_in_reward:
+                            batch, kl_metrics = apply_kl_penalty(
+                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                            )
+                            metrics.update(kl_metrics)
                         else:
-                            # rule_based: 使用 reward_fn 或 rm 的输出
-                            if self.config.algorithm.use_kl_in_reward:
-                                batch, kl_metrics = apply_kl_penalty(
-                                    batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
-                                )
-                                metrics.update(kl_metrics)
-                            else:
-                                batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
-                            metrics["reward_source/rule_based"] = 1.0
-                        # ========== End Reward Source ==========
+                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                        reward_binarize = self.config.algorithm.get("reward_binarize", False)
+                        if isinstance(reward_binarize, str):
+                            reward_binarize = reward_binarize.lower() in ("true", "1", "yes")
+                        if reward_binarize:
+                            threshold = self.config.algorithm.get("reward_threshold", 0.5)
+                            if isinstance(threshold, str):
+                                threshold = float(threshold)
+                            batch.batch["token_level_rewards"] = (
+                                batch.batch["token_level_rewards"] > threshold
+                            ).float()
+                            metrics["reward_source/reward_binarized"] = 1.0
+                        # ========== End Reward ==========
 
-                        # ========== Reward Mask (轨迹级别随机 mask) ==========
-                        # 在 GAE 计算之前，对整条轨迹的 reward 做 Bernoulli mask
-                        # 被 mask 的轨迹 reward 置 0（需配合 flip 使 critic value 成为有效信号）
+                        # ========== Reward Mask (轨迹级别 mask) ==========
+                        # 在 GAE 计算之前，对整条轨迹的 reward 做 mask，被 mask 的轨迹 reward 置 0
+                        # 类型: bernoulli（每条独立概率）/ fixed_ratio（每步恰好固定条数被 mask）
                         reward_mask_ratio = self.config.algorithm.get("reward_mask_ratio", 0.0)
+                        reward_mask_ratio = float(reward_mask_ratio) if reward_mask_ratio is not None else 0.0
                         if reward_mask_ratio > 0.0:
                             batch_size = batch.batch["token_level_rewards"].shape[0]
                             device = batch.batch["token_level_rewards"].device
-                            # Bernoulli mask: 1 表示保留，0 表示 mask（整条轨迹 reward 置 0）
-                            keep_mask = torch.bernoulli(
-                                torch.ones(batch_size, device=device) * (1.0 - reward_mask_ratio)
-                            )
-                            # 记录被 mask 的样本数量
+                            reward_mask_type = self.config.algorithm.get("reward_mask_type", "bernoulli")
+                            if reward_mask_type == "fixed_ratio":
+                                # 每步恰好 mask floor(batch_size * ratio) 条，更贴近「只有固定比例有 reward」的真实设定
+                                num_masked = int(batch_size * reward_mask_ratio)
+                                num_masked = min(num_masked, batch_size)
+                                keep_mask = torch.ones(batch_size, device=device, dtype=torch.float32)
+                                if num_masked > 0:
+                                    mask_indices = torch.randperm(batch_size, device=device)[:num_masked]
+                                    keep_mask[mask_indices] = 0.0
+                            else:
+                                # bernoulli: 每条轨迹独立以概率 reward_mask_ratio 被 mask
+                                keep_mask = torch.bernoulli(
+                                    torch.ones(batch_size, device=device) * (1.0 - reward_mask_ratio)
+                                )
                             num_masked = int((keep_mask == 0).sum().item())
                             metrics["reward_mask/num_masked"] = num_masked
                             metrics["reward_mask/mask_ratio_actual"] = num_masked / batch_size
-                            # 整条轨迹的 reward 整体置 0（不是 token-level mask）
+                            metrics["reward_mask/type"] = float(
+                                reward_mask_type == "fixed_ratio"
+                            )  # 0=bernoulli, 1=fixed_ratio
                             batch.batch["token_level_rewards"] = (
                                 batch.batch["token_level_rewards"] * keep_mask.unsqueeze(-1)
                             )
-                            # 保存 keep_mask 供 GAE 后翻转被 mask 轨迹的 advantage（见下方）
-                            batch.batch["_reward_keep_mask"] = keep_mask
                         # ========== End Reward Mask ==========
 
                         # Compute rollout correction: IS weights, rejection sampling, and metrics
@@ -1655,36 +1680,30 @@ class RayPPOTrainer:
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
 
+                        # GAE lambda 分离：advantage 用 lam_actor（默认 0.95），returns 用 lam_critic（默认 1.0）；未设则用 algorithm.lam
+                        lam_actor = getattr(self.config.algorithm, "lam_actor", None)
+                        lam_critic = getattr(self.config.algorithm, "lam_critic", None)
+                        if lam_actor is None:
+                            lam_actor = self.config.algorithm.lam
+                        if lam_critic is None:
+                            lam_critic = self.config.algorithm.lam
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
+                            lam_actor=lam_actor,
+                            lam_critic=lam_critic,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
 
-                        # ========== Reward Mask: 翻转被 mask 轨迹的 advantage ==========
-                        # 当 reward 被 mask 为 0 时，GAE 得到的 advantage 符号相反（鼓励差样本、抑制好样本）
-                        # 翻转后：高 V(好) -> 正 advantage -> 鼓励；低 V(差) -> 负 advantage -> 抑制
-                        if "_reward_keep_mask" in batch.batch:
-                            keep_mask = batch.batch["_reward_keep_mask"]
-                            flip_when_masked = self.config.algorithm.get(
-                                "reward_mask_flip_adv_when_masked", True
-                            )
-                            if flip_when_masked:
-                                # 被 mask 轨迹 (keep=0): 乘 -1；未 mask (keep=1): 乘 +1
-                                batch.batch["advantages"] = batch.batch["advantages"] * (
-                                    2 * keep_mask.float() - 1
-                                ).unsqueeze(-1)
-                                metrics["reward_mask/flip_adv"] = 1.0
-                            del batch.batch["_reward_keep_mask"]
-                        # ========== End Reward Mask Flip ==========
-
                     # update critic (skip if frozen)
                     if self.use_critic:
                         freeze_critic = self.config.critic.get("freeze", False)
+                        if isinstance(freeze_critic, str):
+                            freeze_critic = freeze_critic.lower() in ("true", "1", "yes")
                         if not freeze_critic:
                             with marked_timer("update_critic", timing_raw, color="pink"):
                                 critic_output = self._update_critic(batch)
