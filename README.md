@@ -43,4 +43,13 @@ verl is the open-source version of **HybridFlow: A Flexible and Efficient RLHF F
 | `docs/MODIFICATIONS_VS_PPO_CRITIC.md` | 与上游 PPO_critic/verl 的修改说明 |
 | `run_*.sh` | 各场景启动脚本 |
 
+### 主要脚本 / Main scripts
+
+| 脚本 | 说明 |
+|------|------|
+| **`run_qwen3_ppo.sh`** | 统一 Qwen3 PPO 入口：通过环境变量切换数据集（gsm8k/math）、模型规模（0.6b/4b）、预训练 critic、reward 二值化、轨迹级 mask、critic 冻结、GAE lambda 等；消融实验命令见同目录 `run_ppo_ablation_commands.md`。 |
+| **`run_eval_critic.sh`** | 评估预训练 critic 的 reward 预测能力：用 vLLM 生成 rollout，rule-based 算 ground-truth，critic 预测并与阈值二分类，输出 accuracy/AUC 等；支持 `DATA=math MODEL_TAG=0.6b` 等环境变量。 |
+| **`scripts/eval_critic_prediction.py`** | 上述评估的 Python 实现：加载 parquet 数据、生成 rollout、用 critic 取最后 token value 作预测、计算指标；可单独调用或由 `run_eval_critic.sh` 调用。 |
+| **`scripts/convert_critic_to_hf.py`** | 将 VeRL/FSDP 格式的 Critic checkpoint 转为 HuggingFace 格式；仅需 `torch`、`transformers`、`accelerate`、`safetensors`，不依赖 verl 包。 |
+
 更多使用方式请参考 `verl/` 内文档与 [verl 官方文档](https://verl.readthedocs.io/)。
