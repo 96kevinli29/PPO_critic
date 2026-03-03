@@ -1,9 +1,9 @@
 # PPO_critic
 
 > **Purpose**  
-> This repo runs **PPO with Critic** on [verl](https://github.com/verl-project/verl): using critic value as reward, trajectory-level reward mask, and critic freeze, to explore value-based (or hybrid) reward for RL training.  
+> This repo runs **PPO with Critic** on [verl](https://github.com/verl-project/verl) to explore **reward-free** RL: using critic value as (bootstrapped) signal, trajectory-level reward mask, and frozen critic, so that training can proceed when reward is masked or absent.  
 >  
-> **目的**：在 verl 上做带 Critic 的 PPO 实验：用 Critic 的 value 作为 reward、轨迹级 mask、critic 冻结等，探索价值函数替代/辅助规则 reward 的 RL 效果。
+> **目的**：在 verl 上做带 Critic 的 PPO 实验，探索 **reward-free**：用 Critic 的 value 作为信号、轨迹级 reward mask、critic 冻结，在无/稀疏 reward 下进行 RL 训练。
 
 **Modifications:** [docs/MODIFICATIONS_VS_PPO_CRITIC.md](docs/MODIFICATIONS_VS_PPO_CRITIC.md) · **Upstream:** [verl-project/verl](https://github.com/verl-project/verl)
 
