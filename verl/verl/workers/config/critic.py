@@ -12,16 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ===============================================================================
-# [Custom Modifications - 2026-02-01]
-# ===============================================================================
-# Freeze Critic 配置项
-#
-# 1. FSDPCriticConfig 类
-#    - 位置: 约第 201 行
-#    - 功能: 添加 freeze: bool = False 字段，支持冻结 critic 参数
-#    - 配置: critic.freeze (true/false，默认 false)
-# ===============================================================================
+# critic.freeze: 预训练 critic 仅前向不更新时设为 true
 
 import warnings
 from dataclasses import dataclass, field
@@ -102,6 +93,9 @@ class CriticConfig(BaseConfig):
     def __post_init__(self):
         """Validate critic configuration parameters."""
         assert self.strategy != MISSING
+
+        if isinstance(self.freeze, str):
+            self.freeze = self.freeze.lower() in ("true", "1", "yes")
 
         if self.model_config is None:
             warnings.warn("using model in Critic Config is deprecated, please use model_config instead", stacklevel=2)
@@ -210,7 +204,6 @@ class FSDPCriticConfig(CriticConfig):
     forward_micro_batch_size_per_gpu: int = 1
     ulysses_sequence_parallel_size: int = 1
     grad_clip: float = 1.0
-    freeze: bool = False  # [Custom] 冻结 critic 参数，不参与梯度更新
 
     def __post_init__(self):
         """Validate FSDP critic configuration parameters."""

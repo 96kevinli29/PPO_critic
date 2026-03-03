@@ -77,9 +77,11 @@ algorithm:
   # Trade-off between bias and variance in the GAE estimator (used when lam_actor/lam_critic not set)
   lam: 1.0
 
-  # GAE lambda 分离：actor 用 lam_actor 算 advantage（默认 0.95 降方差），critic 用 lam_critic 算 returns（默认 1.0）；未设则用 lam
-  lam_actor: 0.95
-  lam_critic: 1.0
+  # GAE lambda for advantage (actor). null => use lam. Override via script to enable separation.
+  lam_actor: null
+
+  # GAE lambda for returns (critic). null => use lam. Override via script to enable separation.
+  lam_critic: null
 
   # Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
   adv_estimator: gae
@@ -111,8 +113,13 @@ algorithm:
     # Target KL divergence (used for adaptive controller)
     target_kl: 0.1
 
+  reward_mask_ratio: 0.0
   # Reward mask type when reward_mask_ratio > 0: "bernoulli" (per-trajectory random) | "fixed_ratio" (exact count per batch)
   reward_mask_type: bernoulli
+  reward_binarize: false
+  reward_threshold: 0.5
+  # When true, log reward/advantage/returns stats to metrics (e.g. for debugging critic-as-reward training)
+  diagnose_reward_advantage: false
 
   # Whether to enable preference feedback PPO
   use_pf_ppo: False

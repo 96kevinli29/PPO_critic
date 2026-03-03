@@ -572,7 +572,9 @@ class AlgoConfig(BaseConfig):
 
     Args:
         gamma (float): Discount factor for future rewards.
-        lam (float): Trade-off between bias and variance in the GAE estimator.
+        lam (float): Trade-off between bias and variance in the GAE estimator (used for both when lam_actor/lam_critic not set).
+        lam_actor (Optional[float]): GAE lambda for advantage (actor). If None, use lam. Default 0.95 when set in yaml.
+        lam_critic (Optional[float]): GAE lambda for returns (critic). If None, use lam. Default 1.0 when set in yaml.
         adv_estimator (str): Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
         norm_adv_by_std_in_grpo (bool): Whether to normalize advantages by std (specific to GRPO).
         use_kl_in_reward (bool): Whether to enable in-reward KL penalty.
@@ -581,6 +583,9 @@ class AlgoConfig(BaseConfig):
         use_pf_ppo (bool): Whether to enable preference feedback PPO.
         pf_ppo (dict[str, Any]): Preference feedback PPO settings.
         filter_groups (Optional[FilterGroupsConfig]): Filter groups configuration, used in DAPO and Entropy
+        reward_mask_type (str): Trajectory-level reward mask type when reward_mask_ratio > 0.
+            "bernoulli": each trajectory independently masked with probability reward_mask_ratio (per-step variance).
+            "fixed_ratio": exactly floor(batch_size * reward_mask_ratio) trajectories masked each step (stable proportion).
         rollout_correction (Optional[RolloutCorrectionConfig]): Rollout Correction configuration.
             Addresses off-policy issues from policy mismatch, model staleness, and general distribution shifts.
 
@@ -601,6 +606,8 @@ class AlgoConfig(BaseConfig):
 
     gamma: float = 1.0
     lam: float = 1.0
+    lam_actor: Optional[float] = None  # GAE lambda for advantages (actor); None => use lam
+    lam_critic: Optional[float] = None  # GAE lambda for returns (critic); None => use lam
     adv_estimator: str = "gae"
     norm_adv_by_std_in_grpo: bool = True
     use_kl_in_reward: bool = False
@@ -609,6 +616,17 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
+    reward_mask_ratio: float = 0.0
+    # Reward mask: "bernoulli" (per-trajectory random) | "fixed_ratio" (exact count per batch, more realistic)
+    reward_mask_type: str = "bernoulli"
+    reward_binarize: bool = False
+    reward_threshold: float = 0.5
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None
+
+    def __post_init__(self):
+        if isinstance(self.reward_binarize, str):
+            self.reward_binarize = self.reward_binarize.lower() in ("true", "1", "yes")
+        self.reward_threshold = float(self.reward_threshold)
+        self.reward_mask_ratio = float(self.reward_mask_ratio) if self.reward_mask_ratio is not None else 0.0

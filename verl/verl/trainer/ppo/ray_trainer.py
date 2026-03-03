@@ -223,8 +223,8 @@ def compute_advantage(
         if config.get("use_pf_ppo", False):
             data = core_algos.compute_pf_ppo_reweight_data(
                 data,
-                config.pf_ppo.get("reweight_method"),
-                config.pf_ppo.get("weight_pow"),
+                config.pf_ppo.get("reweight_method", "pow"),
+                config.pf_ppo.get("weight_pow", 2.0),
             )
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
@@ -1605,8 +1605,15 @@ class RayPPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        # ========== Reward (与 verl 一致: rule_based / RM，仅加二值化) ==========
-                        # reward 来自 reward_fn 或 reward_model.model.path 的模型（含 critic 转 HF 当 RM）
+                        # ========== Reward (rule_based / RM + 二值化 + KL) ==========
+                        # 先二值化 scores（outcome reward），再加 KL（per-token 连续惩罚）
+                        # 顺序很重要：若先加 KL 再二值化，per-token KL 信号会被 > threshold 完全销毁
+                        if self.config.algorithm.get("reward_binarize", False):
+                            threshold = self.config.algorithm.get("reward_threshold", 0.5)
+                            batch.batch["token_level_scores"] = (
+                                batch.batch["token_level_scores"] > threshold
+                            ).float()
+                            metrics["reward_source/reward_binarized"] = 1.0
                         if self.config.algorithm.use_kl_in_reward:
                             batch, kl_metrics = apply_kl_penalty(
                                 batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
@@ -1614,24 +1621,12 @@ class RayPPOTrainer:
                             metrics.update(kl_metrics)
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
-                        reward_binarize = self.config.algorithm.get("reward_binarize", False)
-                        if isinstance(reward_binarize, str):
-                            reward_binarize = reward_binarize.lower() in ("true", "1", "yes")
-                        if reward_binarize:
-                            threshold = self.config.algorithm.get("reward_threshold", 0.5)
-                            if isinstance(threshold, str):
-                                threshold = float(threshold)
-                            batch.batch["token_level_rewards"] = (
-                                batch.batch["token_level_rewards"] > threshold
-                            ).float()
-                            metrics["reward_source/reward_binarized"] = 1.0
                         # ========== End Reward ==========
 
                         # ========== Reward Mask (轨迹级别 mask) ==========
                         # 在 GAE 计算之前，对整条轨迹的 reward 做 mask，被 mask 的轨迹 reward 置 0
                         # 类型: bernoulli（每条独立概率）/ fixed_ratio（每步恰好固定条数被 mask）
                         reward_mask_ratio = self.config.algorithm.get("reward_mask_ratio", 0.0)
-                        reward_mask_ratio = float(reward_mask_ratio) if reward_mask_ratio is not None else 0.0
                         if reward_mask_ratio > 0.0:
                             batch_size = batch.batch["token_level_rewards"].shape[0]
                             device = batch.batch["token_level_rewards"].device
@@ -1680,20 +1675,13 @@ class RayPPOTrainer:
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
 
-                        # GAE lambda 分离：advantage 用 lam_actor（默认 0.95），returns 用 lam_critic（默认 1.0）；未设则用 algorithm.lam
-                        lam_actor = getattr(self.config.algorithm, "lam_actor", None)
-                        lam_critic = getattr(self.config.algorithm, "lam_critic", None)
-                        if lam_actor is None:
-                            lam_actor = self.config.algorithm.lam
-                        if lam_critic is None:
-                            lam_critic = self.config.algorithm.lam
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
-                            lam_actor=lam_actor,
-                            lam_critic=lam_critic,
+                            lam_actor=getattr(self.config.algorithm, "lam_actor", None),
+                            lam_critic=getattr(self.config.algorithm, "lam_critic", None),
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
@@ -1701,10 +1689,7 @@ class RayPPOTrainer:
 
                     # update critic (skip if frozen)
                     if self.use_critic:
-                        freeze_critic = self.config.critic.get("freeze", False)
-                        if isinstance(freeze_critic, str):
-                            freeze_critic = freeze_critic.lower() in ("true", "1", "yes")
-                        if not freeze_critic:
+                        if not self.config.critic.get("freeze", False):
                             with marked_timer("update_critic", timing_raw, color="pink"):
                                 critic_output = self._update_critic(batch)
                             critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])

@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-03：dapo_math 支持与评估脚本同步 PPO_critic
+
+- **run_qwen3_ppo.sh**：支持 `DATA=dapo_math`（数据路径 `data/dapo_math/train|test.parquet`，critic 输出 `critic_qwen3_*_ppo_dapo_math*`）；阶段 1 结束后自动备份并转 HF 需 `SAVE_FREQ>0` 且训练正常退出。
+- **run_eval_critic.sh**：新增 `dapo_math` 分支；实验名与输出目录去掉阈值后缀（`eval_critic_${DATA}_${MODEL_TAG}`）。
+- **scripts/eval_critic_prediction.py**：兼容 `math_dapo` 的 `compute_score` 返回 dict 及 -1/1 reward（取 `score`、`max(score,0)` 转 0/1）。
+- **scripts/convert_critic_to_hf.py**：已存在，与阶段 1 保存的 FSDP critic 转 HF 流程配套。
+- 同步至 [PPO_critic](https://github.com/96kevinli29/PPO_critic) 的详细说明见 [docs/UPDATE_2026_03_PPO_CRITIC.md](docs/UPDATE_2026_03_PPO_CRITIC.md)。
+
+---
+
 ## 算法修改目的
 
 在 **GSM8K / MATH** 上验证**稀疏 reward / reward-free** 下的 PPO 表现：控制「无 reward」轨迹比例，观察在 critic 仅作 baseline 时 actor 是否仍能学习。
@@ -12,6 +22,104 @@
 - **阶段 2**：Base 作 actor，PPO + 可配置 reward（rule-based 或 critic 转 HF 当 RM）+ **reward mask**（0–100%）+ **冻结 critic**。
 
 实现上仅在「reward → GAE → loss」链路上增加可配置的 mask、二值化、critic 冻结；**不改变 PPO 数学形式**（GAE/clip/loss 不变），不修改 `core_algos.py`，保持最小侵入。
+
+---
+
+## 2026-02-21：Bug 修复 + 脚本优化
+
+### 修改 1：`compute_pf_ppo_reweight_data` 调用缺少默认值（Bug 修复）
+
+**文件**：`verl/verl/trainer/ppo/ray_trainer.py` 第 226–227 行
+
+**原因**：`compute_pf_ppo_reweight_data(data, reweight_method="pow", weight_pow=2.0)` 函数签名有默认参数，但调用处使用 `config.pf_ppo.get("reweight_method")` 和 `config.pf_ppo.get("weight_pow")` 时没有提供 `.get()` 的默认值。当 YAML 配置中未设置这两项时，`.get()` 返回 `None`，会**覆盖**函数签名中的默认参数（Python 语义：显式传入 `None` 不等于不传），导致后续用 `None` 做字符串比较时报错。
+
+**修复**：
+```python
+# 修复前
+config.pf_ppo.get("reweight_method"),
+config.pf_ppo.get("weight_pow"),
+# 修复后
+config.pf_ppo.get("reweight_method", "pow"),
+config.pf_ppo.get("weight_pow", 2.0),
+```
+
+---
+
+### 修改 2：`AlgoConfig` 补齐缺失字段定义（类型安全）
+
+**文件**：`verl/verl/trainer/config/algorithm.py`、`verl/verl/trainer/config/ppo_trainer.yaml`
+
+**原因**：`reward_mask_ratio`、`reward_binarize`、`reward_threshold` 三个配置项在 `ray_trainer.py` 中通过 `.get()` 使用，但未在 `AlgoConfig` dataclass 中声明。这意味着：
+1. 没有类型检查——传入错误类型不会在启动时报错，只在运行时崩溃；
+2. IDE 无法自动补全，容易拼写错误；
+3. 启动脚本必须用 `+` 前缀（Hydra 的"注入新键"语法）来传递这些值，语义上不正确（这些不是"新增键"，而是算法的正式参数）。
+
+**修复**：在 `AlgoConfig` 中添加字段定义，在 `ppo_trainer.yaml` 中添加对应默认值：
+```python
+# algorithm.py
+reward_mask_ratio: float = 0.0
+reward_binarize: bool = False
+reward_threshold: float = 0.5
+```
+```yaml
+# ppo_trainer.yaml
+reward_mask_ratio: 0.0
+reward_binarize: false
+reward_threshold: 0.5
+```
+
+---
+
+### 修改 3：脚本新增 `LAM_ACTOR` / `LAM_CRITIC` 环境变量
+
+**文件**：`run_qwen3_ppo.sh`
+
+**原因**：代码中已实现 dual GAE lambda（`lam_actor` 算 advantage、`lam_critic` 算 returns），`ppo_trainer.yaml` 中已有默认值 0.95 / 1.0，但启动脚本未提供对应的环境变量接口，也未将其传递到训练命令中。这意味着：用户无法通过环境变量覆盖 GAE lambda 做消融实验，且实验名中无法体现该条件。
+
+**修复**：
+- 新增环境变量 `LAM_ACTOR`（默认 0.95）、`LAM_CRITIC`（默认 1.0）
+- 在训练命令中传递 `algorithm.lam_actor=$LAM_ACTOR algorithm.lam_critic=$LAM_CRITIC`
+
+---
+
+### 修改 4：移除已定义字段的 `+` 前缀
+
+**文件**：`run_qwen3_ppo.sh`
+
+**原因**：修改 2 将 `reward_mask_ratio`、`reward_binarize`、`reward_threshold` 添加到 `AlgoConfig` dataclass 后，它们已是配置 schema 的一部分。Hydra 中 `+key=value` 的语义是"注入一个 schema 中不存在的新键"，对于已定义的字段应使用 `key=value`（无 `+`）。保留 `+` 虽不报错，但语义不准确，且在 Hydra 严格模式下可能产生警告。
+
+**修复**：
+```bash
+# 修复前
++algorithm.reward_mask_ratio=$REWARD_MASK_RATIO
++algorithm.reward_binarize=$REWARD_BINARIZE
++algorithm.reward_threshold=$REWARD_THRESHOLD
+# 修复后
+algorithm.reward_mask_ratio=$REWARD_MASK_RATIO
+algorithm.reward_binarize=$REWARD_BINARIZE
+algorithm.reward_threshold=$REWARD_THRESHOLD
+```
+
+---
+
+### 修改 5：实验名称体现所有独立对照条件
+
+**文件**：`run_qwen3_ppo.sh`
+
+**原因**：原实验名格式 `qwen3_{MODEL}_ppo_{DATA}_{RS}_m{MASK}_{C_TAG}_{F_TAG}` 缺少以下独立实验条件：
+- **二值化**（`reward_binarize`）：是否对 reward 做 0/1 转换，直接影响 advantage 的尺度；
+- **Mask 类型**（`reward_mask_type`）：bernoulli vs fixed_ratio 是不同的稀疏化策略，实验结论不同；
+- **GAE lambda**（`lam_actor`/`lam_critic`）：非默认 lambda 会改变 bias-variance 权衡。
+
+这些条件在 wandb 中无法区分，导致同名实验覆盖或混淆。
+
+**修复**：新实验名格式：
+```
+qwen3_{MODEL}_ppo_{DATA}_{RS}[_bin]_m{MASK}[_{MT}]_{C_TAG}_{F_TAG}[_la{X}_lc{Y}]
+```
+- `_bin`：仅 `REWARD_BINARIZE=true` 时出现
+- `_bern` / `_fix`：仅 mask > 0 时出现，区分 mask 策略
+- `_la{X}_lc{Y}`：仅 GAE lambda 非默认值时出现
 
 ---
 
@@ -29,8 +137,8 @@
 ### 涉及文件（概要）
 
 - `verl/verl/trainer/ppo/ray_trainer.py`：二值化、mask（bernoulli / fixed_ratio）、跳过 frozen critic 更新、GAE 双 lambda（lam_actor/lam_critic）；`reward_binarize` 从环境变量传入时做字符串解析
-- `verl/verl/trainer/config/algorithm.py`：`lam_actor`、`lam_critic`、`reward_mask_type` 配置项
-- `verl/verl/trainer/config/ppo_trainer.yaml`：默认 `lam_actor: 0.95`、`lam_critic: 1.0`、`reward_mask_type: bernoulli`
+- `verl/verl/trainer/config/algorithm.py`：`lam_actor`、`lam_critic`、`reward_mask_type`、`reward_mask_ratio`、`reward_binarize`、`reward_threshold` 配置项
+- `verl/verl/trainer/config/ppo_trainer.yaml`：默认 `lam_actor: 0.95`、`lam_critic: 1.0`、`reward_mask_type: bernoulli`、`reward_mask_ratio: 0.0`、`reward_binarize: false`、`reward_threshold: 0.5`
 - `verl/verl/workers/fsdp_workers.py`：freeze 时冻结参数并返回 `None` optimizer
 - `verl/verl/workers/critic/dp_critic.py`：`critic_optimizer is None` 时跳过更新
 - `verl/verl/workers/config/critic.py`、`verl/verl/trainer/config/critic/critic.yaml`：`freeze` 配置项
@@ -74,8 +182,8 @@
 
 **前提**：先完成阶段 1 并得到预训练 critic 的 HF 路径（如 `$HYLBASE/critic_qwen3_0.6b_ppo_gsm8k_hf`）。未做阶段 1 时，用「基线 A」即可（基座 critic、可训、无 mask），与阶段 2 的「预训练 + 冻结」做对比需先有 critic HF。
 
-**实验名格式**：`qwen3_{MODEL}_ppo_{DATA}_{RS}_m{MASK}_{cpt|cb}_{fr|tr}`  
-（RS=rb/c06b/c4b，m=mask 比例，cpt=预训练 critic / cb=基座，fr=冻结 / tr=可训）
+**实验名格式**：`qwen3_{MODEL}_ppo_{DATA}_{RS}[_bin]_m{MASK}[_{MT}]_{cpt|cb}_{fr|tr}[_la{X}_lc{Y}]`  
+（RS=rb/c06b/c4b，bin=二值化，m=mask 比例，MT=bern/fix，cpt=预训练 critic / cb=基座，fr=冻结 / tr=可训，la/lc=非默认 GAE lambda）
 
 ### 便捷入口（run_ablation.sh）
 

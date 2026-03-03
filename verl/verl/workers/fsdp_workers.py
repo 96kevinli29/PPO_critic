@@ -1494,8 +1494,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After critic FSDP", logger=None)
 
         # ========== Freeze Critic 支持 ==========
-        freeze_critic = config.get("freeze", False)
-        if freeze_critic:
+        if config.get("freeze", False):
             # 冻结所有参数，不参与梯度更新
             for param in critic_module.parameters():
                 param.requires_grad = False
@@ -1562,7 +1561,6 @@ class CriticWorker(Worker, DistProfilerExtension):
             config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer
         )
         
-        # 标记是否冻结 critic
         self._freeze_critic = self.config.get("freeze", False)
 
         self.flops_counter = FlopsCounter(self.critic_model_config)
