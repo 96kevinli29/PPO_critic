@@ -1,0 +1,19 @@
+# 用法见 README「Docker 一键环境」。
+# 需安装 NVIDIA Container Toolkit：https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#
+# 构建：docker compose build
+# 进入：docker compose run --rm hyl
+services:
+  hyl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hyl-env:latest
+    working_dir: /workspace/hyl
+    stdin_open: true
+    tty: true
+    gpus: all
+    volumes:
+      - ./data:/workspace/hyl/data
+      - ./hyl_outputs:/workspace/hyl/hyl_outputs
+      - ./hyl_logs:/workspace/hyl/hyl_logs

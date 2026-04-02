@@ -13,7 +13,23 @@
 # limitations under the License.
 # from . import gsm8k, math, prime_math, prime_code
 
+import re
+
 from verl.utils.import_utils import deprecated
+
+_GPQA_CHOICE_PATTERN = re.compile(r"(?i)(?:answer\s*[:：]\s*|\\boxed\{\\text\{|\\boxed\{)([A-Da-d])")
+
+
+def _compute_gpqa_choice_score(solution_str: str, ground_truth: str) -> float:
+    """Score GPQA-Diamond by extracting the choice letter (A/B/C/D) and comparing with ground truth."""
+    solution_tail = solution_str[-600:] if len(solution_str) > 600 else solution_str
+    matches = _GPQA_CHOICE_PATTERN.findall(solution_tail)
+    if not matches:
+        fallback = re.findall(r"\b([A-Da-d])\b", solution_tail.split("Answer")[-1] if "Answer" in solution_tail else solution_tail[-100:])
+        pred = fallback[-1].upper() if fallback else ""
+    else:
+        pred = matches[-1].upper()
+    return 1.0 if pred == ground_truth.strip().upper() else 0.0
 
 
 def default_compute_score(
@@ -41,25 +57,16 @@ def default_compute_score(
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
     """
-    if data_source == "openai/gsm8k":
-        from . import gsm8k
+    if data_source in [
+        "openai/gsm8k",
+        "lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500",
+        "math_dapo", "math", "math_dapo_reasoning",
+    ] or data_source.startswith("aime") or data_source.startswith("amc"):
+        from . import math_verify
 
-        res = gsm8k.compute_score(solution_str, ground_truth)
-    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500"]:
-        from . import math_reward
-
-        res = math_reward.compute_score(solution_str, ground_truth)
-        # [Optional] Math-Verify Integration
-        # For enhanced accuracy, consider utilizing Math-Verify (https://github.com/huggingface/Math-Verify).
-        # Note: Math-Verify needs to be manually installed via pip: `pip install math-verify`.
-        # To use it, override the `compute_score` function with the following implementation:
-
-        # from . import math_verify
-        # res = math_verify.compute_score(solution_str, ground_truth)
-    elif data_source in ["math_dapo", "math", "math_dapo_reasoning"] or data_source.startswith("aime"):
-        from . import math_dapo
-
-        res = math_dapo.compute_score(solution_str, ground_truth)
+        res = math_verify.compute_score(solution_str, ground_truth)
+    elif data_source == "gpqa_diamond":
+        res = _compute_gpqa_choice_score(solution_str, ground_truth)
     elif data_source in [
         "numina_aops_forum",
         "numina_synthetic_math",

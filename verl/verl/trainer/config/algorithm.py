@@ -618,9 +618,9 @@ class AlgoConfig(BaseConfig):
     filter_groups: Optional[FilterGroupsConfig] = None
     reward_mask_ratio: float = 0.0
     # Reward mask: "bernoulli" (per-trajectory random) | "fixed_ratio" (exact count per batch, more realistic)
-    reward_mask_type: str = "bernoulli"
+    reward_mask_type: str = "fixed_ratio"
     reward_binarize: bool = False
-    reward_threshold: float = 0.5
+    reward_threshold: float = 0.88
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None

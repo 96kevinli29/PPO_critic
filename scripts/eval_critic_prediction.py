@@ -10,8 +10,8 @@
 
 用法:
   python scripts/eval_critic_prediction.py \
-      --actor_path  ./Qwen3-0.6B \
-      --critic_path ./critic_qwen3_0.6b_ppo_math_lighteval_hf \
+      --actor_path  ./Qwen3-4B-SFT \
+      --critic_path ./qwen3-4b-critic \
       --data_path   ./data/math_lighteval/test.parquet \
       --data_source lighteval/MATH \
       --max_samples 1000 \
@@ -63,8 +63,9 @@ def generate_rollouts(
     top_p: float = 0.95,
     gpu_memory_utilization: float = 0.5,
     tensor_parallel_size: int = 1,
+    attn_implementation: str | None = None,
 ):
-    """用 vLLM 生成 rollout，返回 (prompt_texts, responses)。"""
+    """用 vLLM 生成 rollout，返回 (prompt_texts, responses)。attn_implementation 优先 flash_attention_2。"""
     from vllm import LLM, SamplingParams
 
     prompt_texts = [
@@ -72,7 +73,7 @@ def generate_rollouts(
         for p in prompts
     ]
 
-    llm = LLM(
+    kwargs = dict(
         model=actor_path,
         trust_remote_code=True,
         dtype="bfloat16",
@@ -80,6 +81,13 @@ def generate_rollouts(
         max_model_len=max_new_tokens + 2048,
         tensor_parallel_size=tensor_parallel_size,
     )
+    if attn_implementation:
+        kwargs["attn_implementation"] = attn_implementation
+    try:
+        llm = LLM(**kwargs)
+    except TypeError:
+        kwargs.pop("attn_implementation", None)
+        llm = LLM(**kwargs)
     sampling_params = SamplingParams(
         temperature=temperature,
         top_p=top_p,
@@ -132,15 +140,15 @@ def compute_critic_values(
     """加载 critic，对 (prompt+response) 做前向，取最后有效 token 的 value。"""
     from transformers import AutoModelForTokenClassification
 
+    load_kw = dict(torch_dtype=torch.bfloat16, trust_remote_code=True)
+    if attn_implementation:
+        load_kw["attn_implementation"] = attn_implementation
     if n_gpus > 1:
         model = AutoModelForTokenClassification.from_pretrained(
-            critic_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
-            device_map="auto",
+            critic_path, device_map="auto", **load_kw,
         )
     else:
-        model = AutoModelForTokenClassification.from_pretrained(
-            critic_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
-        )
+        model = AutoModelForTokenClassification.from_pretrained(critic_path, **load_kw)
         model.cuda()
     model.eval()
 
@@ -359,6 +367,8 @@ def main():
                         help="W&B project name (None=disable wandb)")
     parser.add_argument("--wandb_run_name", type=str, default=None,
                         help="W&B run name")
+    parser.add_argument("--attn_implementation", type=str, default=None,
+                        help="Attention: flash_attention_2 or sdpa (default from env VERL_ATTN_IMPLEMENTATION)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -416,6 +426,7 @@ def main():
         batch_size=args.batch_size,
         max_length=args.max_seq_length,
         n_gpus=args.n_gpus,
+        attn_implementation=getattr(args, "attn_implementation", None),
     )
     print(f"  Critic forward took {time.time() - t0:.1f}s")
 

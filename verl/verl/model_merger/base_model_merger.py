@@ -201,20 +201,14 @@ class BaseModelMerger(ABC):
                 case "AutoModelForTokenClassification":
                     return AutoModelForTokenClassification
                 case "AutoModelForVision2Seq":
-                    # Handle different transformers versions for Vision2Seq models
-                    import transformers
-                    from packaging import version
+                    from transformers import AutoModelForImageTextToText
 
-                    if version.parse(transformers.__version__) >= version.parse("4.54.0"):
-                        # transformers >= 4.54.0 uses AutoModelForImageTextToText
-                        from transformers import AutoModelForImageTextToText
-
-                        return AutoModelForImageTextToText
-                    else:
-                        # transformers < 4.54.0 uses AutoModelForVision2Seq
+                    try:
                         from transformers import AutoModelForVision2Seq
 
                         return AutoModelForVision2Seq
+                    except ImportError:
+                        return AutoModelForImageTextToText
                 case _:
                     raise NotImplementedError(f"Unknown auto class {auto_class}")
         else:
@@ -223,7 +217,14 @@ class BaseModelMerger(ABC):
             elif "ForCausalLM" in self.model_config.architectures[0]:
                 return AutoModelForCausalLM
             elif "ForConditionalGeneration" in self.model_config.architectures[0]:
-                return AutoModelForVision2Seq
+                try:
+                    from transformers import AutoModelForVision2Seq
+
+                    return AutoModelForVision2Seq
+                except ImportError:
+                    from transformers import AutoModelForImageTextToText
+
+                    return AutoModelForImageTextToText
 
             raise NotImplementedError(f"Unknown architecture {self.model_config.architectures}")
 

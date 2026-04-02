@@ -5,6 +5,111 @@
 
 ---
 
+## 2026-03-07: 全面代码审查与 Bug 修复
+
+### 审查范围
+
+对照原版 verl 与实验设计，全面审查 SFT/PPO 脚本及调用代码，排查导致"acc 上不去、reward 长期负值"的根因。
+
+### 修复的致命问题
+
+#### 1. `math_dapo.compute_score` 对错误答案返回 -1.0（根因 #1）
+
+**文件**: `verl/verl/utils/reward_score/math_dapo.py`
+
+**问题**: 原版 `math_dapo.compute_score` 对错误答案返回 `-1.0`（第 265 行 `reward = 1.0 if correct else -1.0`），而标准 PPO 通常使用 0/1 reward。训练初期模型准确率约 5%，平均 reward = `0.05×1 + 0.95×(-1) = -0.9`，导致：
+- 训练 reward 和验证 score 长期负值
+- Critic 初始化预测 ~0 但真实 baseline ~-0.9，收敛极慢
+- DAPO-Math 训练集、AIME2024/2025、AMC2023、GPQA-Diamond 验证集全部受影响（均走此函数）
+
+**修复**: 错误答案 reward 从 `-1.0` 改为 `0.0`；同时修复 `is_correct_strict_box` 中的 `-1` → `0`。
+
+#### 2. DAPO-Math 训练集 TRAIN_MAX_SAMPLES 只覆盖约 200 个唯一 prompt（根因 #2）
+
+**文件**: `run_qwen3_ppo.sh`
+
+**问题**: DAPO-Math-17k 数据集共 1,791,700 行（17,398 唯一 prompt，每 prompt 重复约 103 次）。原设置 `TRAIN_MAX_SAMPLES=20000` 取前 20000 行，只覆盖约 200 个唯一题目。verl 的 `RLHFDataset` 不做去重，模型在 200 道题上反复训练，完全无法泛化。
+
+**修复**: `TRAIN_MAX_SAMPLES` 从 `20000` 改为 `-1`（全量加载）。
+
+#### 3. MATH 验证集使用了错误的 reward 函数
+
+**文件**: `verl/verl/utils/reward_score/__init__.py`
+
+**问题**: MATH 验证集（`data_source=DigitalLearningGmbH/MATH-lighteval`）原来走 `math_reward.compute_score`，只识别 `\boxed{}` 格式答案。但模型被 SFT 训练成输出 `Answer: X` 格式（与 DAPO-Math prompt 一致），导致 MATH 验证 acc 永远为 0。
+
+**修复**: 将 `lighteval/MATH`、`DigitalLearningGmbH/MATH-lighteval`、`HuggingFaceH4/MATH-500` 合并到 `math_dapo.compute_score` 分支（支持 `Answer:` 格式解析）。
+
+#### 4. GSM8K 验证集 reward 函数格式不匹配（acc/score/reward 全为 0）
+
+**文件**: `verl/verl/utils/reward_score/__init__.py`
+
+**问题**: GSM8K 验证集（`data_source=openai/gsm8k`）走 `gsm8k.compute_score`，用正则 `#### (\-?[0-9\.\,]+)` 提取答案。但模型经过 NuminaMath-CoT SFT 后输出 `Answer: X` 格式，`gsm8k.compute_score` 找不到 `####` 标记，所有样本 reward=0，导致 wandb 上 GSM8K 的 acc/score/reward 全部为 0。
+
+**修复**: 将 `openai/gsm8k` 也合并到 `math_dapo.compute_score` 分支。`math_dapo` 用 `r"(?i)Answer\s*:\s*([^\n]+)"` 提取答案，与模型输出格式匹配。已验证 GSM8K 纯整数答案（如 "18"）在 `normalize_final_answer` 后能正确匹配。
+
+### 修复的其他问题
+
+#### 4. Freeze Critic 时 checkpoint 保存崩溃
+
+**文件**: `verl/verl/workers/fsdp_workers.py`
+
+**问题**: `freeze=True` 时 `critic_optimizer=None`，但 checkpoint 配置默认 `save_contents: ['model', 'optimizer', 'extra']`。调用 `save_checkpoint` 时触发 `assert self.optimizer is not None`。
+
+**修复**: 在 `init_model()` 中，当 `freeze=True` 时动态将 checkpoint 的 `save_contents`/`load_contents` 改为 `['model', 'extra']`。
+
+#### 5. SFT cosine scheduler 不支持 min_lr
+
+**文件**: `verl/verl/trainer/fsdp_sft_trainer.py`、`verl/verl/trainer/config/sft_trainer.yaml`、`run_qwen3_sft.sh`
+
+**问题**: 实验设计要求 SFT 用 cosine scheduler（lr=2e-5, min_lr=2e-6），但 `fsdp_sft_trainer.py` 调用 `get_cosine_schedule_with_warmup` 时未传 `min_lr_ratio` 参数，cosine 衰减一路降到 0。
+
+**修复**:
+- `fsdp_sft_trainer.py`: 从 `config.optim.min_lr_ratio` 读取并传入
+- `sft_trainer.yaml`: 新增 `min_lr_ratio: 0.0` 默认值
+- `run_qwen3_sft.sh`: 新增 `MIN_LR_RATIO` 环境变量（默认 0.1），传入 `optim.min_lr_ratio=$MIN_LR_RATIO`
+
+#### 6. PPO 脚本中的无效配置
+
+**文件**: `run_qwen3_ppo.sh`
+
+**问题**: `+trainer.save_critic_model=True` 和 `+trainer.critic_model_output_path` 在 verl trainer 代码中无任何读取，为死配置。Critic 保存实际通过 verl 内置 checkpoint 机制（`save_freq` 控制）完成。
+
+**修复**: 移除两行无效 Hydra 配置。
+
+#### 7. SFT 脚本环境变量名不一致
+
+**文件**: `run_qwen3_sft.sh`
+
+**问题**: SFT 脚本用 `PYTORCH_CUDA_ALLOC_CONF`（旧名），PPO 脚本用 `PYTORCH_ALLOC_CONF`（新名）。
+
+**修复**: 统一为 `PYTORCH_ALLOC_CONF`。
+
+### 修复后 reward 函数对照表
+
+| 数据集 | data_source | reward 函数 | 正确 | 错误 |
+|--------|-------------|-------------|------|------|
+| DAPO-Math（训练） | `math_dapo` | `math_dapo` | 1.0 | 0.0 |
+| AIME2024/2025（验证） | `aime_2024`/`aime_2025` | `math_dapo` | 1.0 | 0.0 |
+| AMC2023（验证） | `amc_2023` | `math_dapo` | 1.0 | 0.0 |
+| GPQA-Diamond（验证） | `gpqa_diamond` | `math_dapo` | 1.0 | 0.0 |
+| MATH（验证） | `MATH-lighteval` | `math_dapo`（已改） | 1.0 | 0.0 |
+| GSM8K（验证/训练） | `openai/gsm8k` | `gsm8k` | 1.0 | 0.0 |
+
+### 本次修改文件列表
+
+| 文件 | 修改内容 |
+|------|----------|
+| `verl/verl/utils/reward_score/math_dapo.py` | 错误答案 reward `-1.0` → `0.0` |
+| `verl/verl/utils/reward_score/__init__.py` | GSM8K + MATH-lighteval 统一走 `math_dapo` reward；返回值标准化 |
+| `verl/verl/workers/fsdp_workers.py` | freeze critic 时 checkpoint 排除 optimizer |
+| `verl/verl/trainer/fsdp_sft_trainer.py` | cosine scheduler 支持 `min_lr_ratio` |
+| `verl/verl/trainer/config/sft_trainer.yaml` | 新增 `min_lr_ratio: 0.0` |
+| `run_qwen3_ppo.sh` | 移除无效配置；DAPO-Math `TRAIN_MAX_SAMPLES` → `-1` |
+| `run_qwen3_sft.sh` | 新增 `MIN_LR_RATIO`；`PYTORCH_CUDA_ALLOC_CONF` → `PYTORCH_ALLOC_CONF` |
+
+---
+
 ## 2026-02-23: 代码审查与相对原版的修改记录核对
 
 ### 审查结论
@@ -34,7 +139,7 @@
 ### 配置与脚本对应关系
 
 - `run_qwen3_ppo.sh` 传入的 Hydra 覆盖项与 `ppo_trainer.yaml` / `algorithm.py` / `critic` 配置一致：  
-  `algorithm.reward_mask_ratio`、`algorithm.reward_mask_type`、`algorithm.reward_binarize`、`algorithm.reward_threshold`、`critic.freeze`、以及可选的 `algorithm.lam_actor`/`algorithm.lam_critic`、`algorithm.diagnose_reward_advantage`（yaml 已有，用于诊断时打 reward/advantage/returns）。
+  `algorithm.reward_mask_ratio`、`algorithm.reward_mask_type`、`algorithm.reward_binarize`、`algorithm.reward_threshold`、`critic.freeze`、以及可选的 `algorithm.lam_actor`/`algorithm.lam_critic`。
 
 ---
 
@@ -47,7 +152,7 @@
 | 文件 | 修改内容 |
 |------|----------|
 | `verl/verl/trainer/config/algorithm.py` | 新增 `lam_actor` / `lam_critic`、`reward_mask_ratio` / `reward_mask_type`、`reward_binarize` / `reward_threshold` |
-| `verl/verl/trainer/config/ppo_trainer.yaml` | 上述 algorithm 项的默认值与注释；`algorithm.diagnose_reward_advantage` |
+| `verl/verl/trainer/config/ppo_trainer.yaml` | 上述 algorithm 项的默认值与注释 |
 | `verl/verl/trainer/config/critic/critic.yaml` | 新增 `freeze: false` |
 | `verl/verl/workers/config/critic.py` | 新增 `freeze: bool = False` 及字符串解析（`true`/`1`/`yes` → True） |
 | `verl/verl/trainer/ppo/ray_trainer.py` | Reward 二值化、Reward Mask（bernoulli/fixed_ratio）、GAE 双 lambda、freeze 时跳过 critic 更新；reward 来自 reward_fn 或 rm_scores |

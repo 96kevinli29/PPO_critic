@@ -115,11 +115,9 @@ algorithm:
 
   reward_mask_ratio: 0.0
   # Reward mask type when reward_mask_ratio > 0: "bernoulli" (per-trajectory random) | "fixed_ratio" (exact count per batch)
-  reward_mask_type: bernoulli
+  reward_mask_type: fixed_ratio
   reward_binarize: false
-  reward_threshold: 0.5
-  # When true, log reward/advantage/returns stats to metrics (e.g. for debugging critic-as-reward training)
-  diagnose_reward_advantage: false
+  reward_threshold: 0.88
 
   # Whether to enable preference feedback PPO
   use_pf_ppo: False

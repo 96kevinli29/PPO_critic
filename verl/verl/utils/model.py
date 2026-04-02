@@ -33,12 +33,16 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
-    AutoModelForVision2Seq,
     GenerationConfig,
     MistralForSequenceClassification,
     PretrainedConfig,
     PreTrainedModel,
 )
+
+try:
+    from transformers import AutoModelForVision2Seq
+except ImportError:
+    AutoModelForVision2Seq = AutoModelForImageTextToText
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from verl.models.registry import ModelRegistry
@@ -619,7 +623,12 @@ def patch_valuehead_model(model) -> None:
 
 
 def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
-    from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
+    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoModelForTokenClassification
+
+    try:
+        from transformers import AutoModelForVision2Seq
+    except ImportError:
+        AutoModelForVision2Seq = AutoModelForImageTextToText
 
     # 从环境变量或模型配置获取 attn_implementation，默认 sdpa（PyTorch 2.0+ 内置加速）
     attn_impl = os.getenv("VERL_ATTN_IMPLEMENTATION") or os.getenv("HF_ATTN_IMPLEMENTATION")

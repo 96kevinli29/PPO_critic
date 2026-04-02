@@ -4,6 +4,89 @@
 
 ---
 
+## 2026-03-10：Reward 打分逻辑重构 —— 对齐社区主流评测标准
+
+### 背景
+
+此前将所有数据集统一路由到 `math_dapo.compute_score`（Minerva `Answer:` 模式），并将错误分数从 `-1` 改为 `0`。这导致：
+1. GSM8K 使用 `math_dapo` 的 Minerva 提取而非原生 `#### number`，与官方 verl 不一致；
+2. MATH-lighteval 丢失了 `math_reward` 的 `is_equiv` 鲁棒等价判断；
+3. GPQA-Diamond 被当作数学题用数值匹配打分，而非选项匹配；
+4. `math_dapo.py` 的分数区间被改为 `[0, 1]`，与官方 `[-1, 1]` 不一致。
+
+### 改动
+
+#### 1. 安装 `math-verify`（HuggingFace 官方数学验证库）
+
+```bash
+pip install math-verify  # 安装版本 0.9.0
+```
+
+verl 仓库已自带 `verl/utils/reward_score/math_verify.py` 封装（官方推荐方案）。`math-verify` 支持 `\boxed{}` 提取 + sympy 符号等价判断，是当前 Qwen3、DeepSeek-R1、DAPO 等社区报告 benchmark 准确率的主流方案。
+
+#### 2. `verl/verl/utils/reward_score/__init__.py` —— 重构路由
+
+| data_source | 打分器 | 说明 |
+|---|---|---|
+| `openai/gsm8k` | `math_verify` | `\boxed{}` 提取 + 符号等价，对齐社区主流 |
+| `DigitalLearningGmbH/MATH-lighteval` 等 | `math_verify` | 同上 |
+| `math_dapo` / `math` / `math_dapo_reasoning` | `math_verify` | DAPO 训练集同样用 math-verify |
+| `aime_*` / `amc_*` | `math_verify` | 竞赛题同样用 math-verify |
+| `gpqa_diamond` | `_compute_gpqa_choice_score` | **新增**：选项题专用打分（提取 A/B/C/D，忽略大小写） |
+| 其余 (numina, code, geo3k, searchR1 等) | 保持不变 | 沿用官方 verl 原有逻辑 |
+
+**为什么不用官方 `gsm8k.compute_score`**：官方打分器用 `#### number` 正则提取，只适用于专门在 GSM8K 上微调过的模型。我们的模型（NuminaMath-CoT SFT）统一输出 `\boxed{X}` + `Answer: X` 格式，`####` 模式永远匹配不到。
+
+**为什么 GPQA 单独处理**：GPQA-Diamond 是多选题（A/B/C/D），ground truth 是单个字母，不适合用数学等价判断。新增的 `_compute_gpqa_choice_score` 从模型输出尾部提取选项字母并做大小写无关比较。
+
+#### 3. `verl/verl/utils/reward_score/math_dapo.py` —— 恢复官方区间
+
+- `compute_score`：错误时 `0.0` → **`-1.0`**（恢复官方 `[-1, 1]` 区间）
+- `is_correct_strict_box`：错误时 `0` → **`-1`**（恢复官方）
+
+注：当前 5 个数学数据集 + GPQA 的评测路由不再经过 `math_dapo`，但保留其官方语义以备后续使用。
+
+### 验证结果（基于已有 rollout 重新打分）
+
+**Qwen3-4B-SFT**（NuminaMath-CoT SFT 后）：
+
+| 数据集 | 正确 | 总数 | 准确率 |
+|---|---|---|---|
+| AIME 2024 | 3 | 30 | 10.00% |
+| AIME 2025 | 1 | 30 | 3.33% |
+| AMC 2023 | 18 | 40 | 45.00% |
+| GPQA-Diamond | 63 | 198 | 31.82% |
+| GSM8K | 1168 | 1319 | **88.55%** |
+| MATH-lighteval | 3296 | 5000 | **65.92%** |
+
+### 兼容性
+
+- `run_ppo.sh`：无需改动。PPO 训练 / 验证通过 `NaiveRewardManager` → `default_compute_score` 自动使用新路由。
+- `run_sft.sh` / `eval_accuracy.py`：无需改动。`math_verify` 和 GPQA 打分器都返回 float，`max(score, 0.0)` 逻辑兼容。
+- `NaiveRewardManager`：第 92-98 行已处理 dict 和 float 两种返回值，完全兼容。
+
+---
+
+## 2026-03-09：PPO 默认值与脚本注释校正
+
+- **脚本注释与实际默认值对齐**  
+  - **文件**：`ppo_run_ppo.sh`  
+  - **修改**：  
+    - `ROLLOUT_N` 注释默认值从 `4` 改为 `1`，与代码 `ROLLOUT_N="${ROLLOUT_N:-1}"` 保持一致（GAE-PPO 标准设置为 1 样本/轨迹）。  
+    - `MAX_RESPONSE_LEN` 注释默认值从 `2048` 改为 `12288`，与代码 `MAX_RESPONSE_LEN="${MAX_RESPONSE_LEN:-12288}"` 保持一致。  
+  - **说明**：仅文档修正，不改变任何实际行为。
+
+- **reward mask 与二值化阈值的默认策略统一**  
+  - **文件**：`verl/verl/trainer/config/algorithm.py`、`verl/verl/trainer/config/ppo_trainer.yaml`  
+  - **修改**：  
+    - `reward_mask_type` 默认值从 `bernoulli` 改为 `fixed_ratio`，与 `run_ppo.sh` 中实验设计保持一致：在给定 `REWARD_MASK_RATIO` 时，每步恰好 mask 固定比例的轨迹，更贴近「只有固定比例样本有外部 reward」的对照设定。  
+    - `reward_threshold` 默认值从 `0.5` 改为 `0.88`，与脚本及 DAPO/MATH 实验中使用的二值化阈值对齐。  
+  - **兼容性**：  
+    - 仅修改 YAML / dataclass 默认值，对通过环境变量或 Hydra 覆盖的实验无影响。  
+    - 保证「不经脚本、直接使用 `main_ppo.py + ppo_trainer.yaml`」时的行为与脚本驱动的实验一致，减少默认值不对齐导致的混淆。
+
+---
+
 ## 2026-03：dapo_math 支持与评估脚本同步 PPO_critic
 
 - **run_qwen3_ppo.sh**：支持 `DATA=dapo_math`（数据路径 `data/dapo_math/train|test.parquet`，critic 输出 `critic_qwen3_*_ppo_dapo_math*`）；阶段 1 结束后自动备份并转 HF 需 `SAVE_FREQ>0` 且训练正常退出。

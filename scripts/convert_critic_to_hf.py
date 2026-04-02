@@ -4,8 +4,8 @@
 
 用法:
     python scripts/convert_critic_to_hf.py \\
-        --local_dir checkpoints/PPO-Project2026/qwen3_0.6b_ppo_gsm8k/global_step_116/critic \\
-        --target_dir critic_qwen3_0.6b_hf \\
+        --local_dir checkpoints/.../global_step_N/critic \\
+        --target_dir qwen3-4b-critic \\
         [--trust-remote-code]
 
 不依赖 verl 包，仅需: torch, transformers, accelerate, safetensors, tqdm

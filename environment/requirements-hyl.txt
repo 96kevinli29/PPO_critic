@@ -1,0 +1,82 @@
+# ==============================================================================
+# HYL：在本机 / 计算节点上运行 verl（与本仓库脚本对齐）— 配置说明 + pip 依赖
+#
+# 只发本文件给他人即可：上半部分为「节点要什么、按什么顺序装」；最下面几行为 pip 实际安装的包。
+# pip 会忽略所有以 # 开头的行；请在「仓库根目录」执行 pip install -r environment/requirements-hyl.txt
+# ==============================================================================
+#
+# ---------------------------------------------------------------------------
+# 一、节点 / 本机应满足的条件（运行 verl 训练前自检）
+# ---------------------------------------------------------------------------
+#
+#   [ ] 系统：Linux x86_64
+#   [ ] GPU：NVIDIA，驱动已正确安装；终端执行 nvidia-smi 能列出 GPU、无报错
+#   [ ] 磁盘：有足够空间（依赖与编译缓存建议预留 ≥30GB，训练与模型另算）
+#   [ ] 用户：使用普通 Linux 账户跑训练与写项目目录（勿长期用 root；示例名 hyl 仅为习惯，请换成自己的用户名）
+#   [ ] 网络：能访问 PyPI；拉 Hugging Face 模型若慢可设 HF_ENDPOINT（见第五节）
+#
+# ---------------------------------------------------------------------------
+# 二、与本仓库固定对齐的配置（见 scripts/hyl_env.sh，勿随意改除非你知道后果）
+# ---------------------------------------------------------------------------
+#
+#   · Conda 环境名：verl-ppo-new
+#   · Python 版本：3.10
+#   · 默认期望的 Python 路径（项目根目录 = $HYLBASE）：
+#       $HYLBASE/miniconda3/envs/verl-ppo-new/bin/python
+#     Miniconda 若装在其他位置，请改 hyl_env.sh 里的 VERL_ENV / PYTHON_CMD，与「本机真实路径」一致。
+#
+# ---------------------------------------------------------------------------
+# 三、安装顺序（必须严格按序；错序可能导致 PyTorch 版本错误）
+# ---------------------------------------------------------------------------
+#
+#   1）安装 Miniconda 或 Anaconda（装在你有写权限的目录即可）。
+#
+#   2）创建并激活环境：
+#         conda create -n verl-ppo-new python=3.10 -y
+#         conda activate verl-ppo-new
+#
+#   3）安装 CUDA 版 PyTorch（下面为 cu124 示例；须与节点驱动、CUDA 匹配，以 https://pytorch.org 为准）：
+#         pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+#       国内可换阿里云 PyTorch 轮子（cu 版本与上保持一致）：
+#         pip install torch torchvision torchaudio --index-url https://mirrors.aliyun.com/pytorch-wheels/cu124/
+#       自检：
+#         python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#       第二项须为 True。
+#
+#   4）克隆本仓库，cd 到仓库根目录（该目录下应同时存在 verl/ 与 environment/ 文件夹）。
+#
+#   5）安装本文件中的 pip 依赖（必须在仓库根目录执行）：
+#         pip install -r environment/requirements-hyl.txt
+#       国内 PyPI 示例（任选其一整行）：
+#         pip install -r environment/requirements-hyl.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+#         pip install -r environment/requirements-hyl.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+#
+#   6）以可编辑方式安装 verl 包：
+#         pip install -e verl
+#
+#   7）可选：复制 .env.example 为 .env 并填写 WANDB、HF_TOKEN；拉模型慢可：
+#         export HF_ENDPOINT=https://hf-mirror.com
+#
+#   8）加载环境并自检：
+#         source scripts/hyl_env.sh eval
+#         python -c "import verl, torch, vllm; print('ok', torch.__version__, vllm.__version__)"
+#
+# ---------------------------------------------------------------------------
+# 四、本文件下半部分「包列表」说明
+# ---------------------------------------------------------------------------
+#
+#   · 包含：verl/requirements.txt 中全部条目 + vLLM + flash-attn（与本仓库默认「FSDP + vLLM rollout」一致）。
+#   · 不包含：torch / torchvision / torchaudio（已在第三节单独安装）、模型权重、数据集。
+#   · 未先完成第三节就执行第五节：vllm 可能自动安装不匹配的 torch，请勿这样做。
+#   · 若不用默认栈（如 SGLang、Megatron）：请查阅 verl 官方文档另装，不在本列表中。
+#
+#   flash-attn 编译失败可再试：pip install flash-attn --no-build-isolation
+#   仍失败可暂不装 flash-attn，hyl_env.sh 会回退 sdpa；numpy 异常可 pip install 'numpy<2.0.0'
+#
+# ==============================================================================
+# 以下为 pip 解析用的依赖（除 # 开头的行外）
+# ==============================================================================
+
+-r ../verl/requirements.txt
+vllm>=0.8.5,<=0.12.0
+flash-attn

@@ -318,8 +318,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             AutoModel,
             AutoModelForCausalLM,
             AutoModelForImageTextToText,
-            AutoModelForVision2Seq,
         )
+
+        try:
+            from transformers import AutoModelForVision2Seq
+        except ImportError:
+            AutoModelForVision2Seq = AutoModelForImageTextToText
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
@@ -1564,12 +1568,20 @@ class CriticWorker(Worker, DistProfilerExtension):
         self._freeze_critic = self.config.get("freeze", False)
 
         self.flops_counter = FlopsCounter(self.critic_model_config)
+        ckpt_config = self.config.checkpoint
+        if self._freeze_critic and self.critic_optimizer is None:
+            from omegaconf import OmegaConf
+
+            ckpt_config = OmegaConf.create({
+                "save_contents": ["model", "extra"],
+                "load_contents": ["model", "extra"],
+            })
         self.checkpoint_manager = FSDPCheckpointManager(
             model=self.critic_module,
             optimizer=self.critic_optimizer,
             lr_scheduler=self.critic_lr_scheduler,
             processing_class=self.processor if self.processor is not None else self.tokenizer,
-            checkpoint_config=self.config.checkpoint,
+            checkpoint_config=ckpt_config,
         )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="critic"))

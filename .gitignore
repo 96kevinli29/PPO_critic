@@ -10,6 +10,9 @@ __pycache__/
 .cache/
 
 # 训练产物与日志
+hyl_outputs/
+hyl_logs/
+logs/
 checkpoints/
 **/*.pt
 **/*.ckpt
@@ -18,15 +21,23 @@ outputs/
 nohup.out
 wandb/
 .wandb_cache/
+.pip_cache/
+ray_tmp
 ray_tmp/
+ray_tmp_hyl/
+.ray_tmp_hyl/
 
 # 本地模型权重（体积大，建议单独管理）
+# 显式列举常见目录 + 通配：避免 Qwen3-4B-SFT、Qwen3-8B-Base、Qwen3.5-* 等变体被 git add .
 Qwen3-0.6B/
 Qwen3-1.7B/
 Qwen3-4B/
 Qwen3-8B/
+# 仅忽略仓库根目录下的 Qwen* 权重文件夹，避免误匹配子目录中的文档/示例名
+/Qwen*/
 critic_qwen3_*_ppo_*/
 critic_qwen3_*_hf/
+/*-RL/
 
 # 数据与临时
 data/
@@ -42,6 +53,9 @@ target/
 .DS_Store
 *.swp
 *~
+
+# 敏感配置
+.env
 
 # 其他
 .git/
